@@ -1,5 +1,7 @@
 # skinai-ai-service
 
+[![CI](https://github.com/cryptologicpsy/skinai-ai-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cryptologicpsy/skinai-ai-service/actions/workflows/ci.yml)
+
 An independent Python/FastAPI backend for SkinAI's AI-related functionality
 (product/ingredient data, and future embeddings/RAG over skincare
 knowledge).
@@ -160,6 +162,60 @@ pip install -r requirements-dev.txt
 ruff check .
 ruff format .
 ```
+
+## CI/CD
+
+Full details (test database lifecycle, required GitHub settings, secret
+management, rollback, troubleshooting) live in
+[`docs/CI_CD.md`](docs/CI_CD.md). Summary:
+
+**CI** (`.github/workflows/ci.yml`, runs on every push/PR to `main` and via
+manual dispatch):
+
+- `ruff check .` and `ruff format --check .` (Python 3.12).
+- Builds both Dockerfile targets (`runtime` and `test`).
+- Starts the same `pgvector/pgvector:pg16` database defined in
+  `compose.yaml`, waits for its healthcheck, and confirms the `vector`
+  extension and the `skinai_test` database are ready.
+- Applies Alembic migrations to the `skinai` database via
+  `docker compose run --rm app alembic upgrade head` (the same command
+  documented above), then runs the full pytest suite against the separate
+  `skinai_test` database via `docker compose run --rm tests pytest -v`
+  (reusing the `tests` Compose service -- see "Running tests").
+- Always tears down containers/volumes for that job, success or failure.
+
+CI does not touch any production database and requires no repository
+secrets.
+
+**CD** (`.github/workflows/deploy.yml`) is a **disabled-by-default
+scaffold** -- see `docs/CI_CD.md` for the full prerequisite list. It never
+deploys automatically:
+
+- Trigger: manual `workflow_dispatch` only, requiring you to type `deploy`
+  into a confirmation input.
+- Guarded by an explicit `main`-branch check *and* a GitHub Environment
+  named `production` (configure this in **Settings -> Environments**, with
+  required reviewers and "Deployment branches" restricted to `main` -- see
+  `docs/CI_CD.md`).
+- Today, running it will always stop at a "Check deployment configuration"
+  step and report exactly which secrets/variables
+  (`DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_PATH`,
+  `DEPLOY_SSH_PRIVATE_KEY`, `DEPLOY_SSH_KNOWN_HOSTS`, ...) are missing,
+  because no VPS hostname, SSH credentials, or deployment path have been
+  configured yet. No network connection is attempted.
+- Once those prerequisites exist and have been reviewed, the (currently
+  commented-out) deploy steps pull an image tagged by commit SHA over SSH
+  to a pinned host key, run migrations against this service's own
+  database only, restart only this service's container, and verify
+  `/health/ready` -- never touching the existing SkinAI/BeautyFlow
+  containers or databases on the VPS.
+- Rollback is manual and deliberate (re-deploy a previous commit SHA's
+  image), not a one-click action -- see `docs/CI_CD.md`.
+
+**This service has no authentication.** CI validates it builds and
+passes tests; it does not make the service safe to expose publicly. Keep
+it internal-only (no public ports, no public reverse-proxy route) until
+auth is implemented -- see "Security notes" below.
 
 ## Database migrations
 

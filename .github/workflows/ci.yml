@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel superseded runs for the same branch/PR so obsolete jobs don't keep
+# burning runner time once a newer push/commit exists.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only reads repo contents. It never
+# publishes packages, writes PR comments, or touches any deployment
+# environment, so the default GITHUB_TOKEN needs nothing beyond read access.
+permissions:
+  contents: read
+
+jobs:
+  # Fast, Docker-free checks. Runs independently of the `test` job so a lint
+  # failure reports in seconds instead of waiting on image builds.
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+  # Builds the real Dockerfile targets and runs the existing pytest suite
+  # against a real PostgreSQL + pgvector instance, reusing the same
+  # compose.yaml services documented in the README (db / app / tests) so CI
+  # exercises the exact same pgvector image, test database name, and
+  # migration path a developer uses locally -- not a second, parallel setup
+  # that could silently drift from it.
+  test:
+    name: Docker build & pytest (Postgres + pgvector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # CI-only placeholder credentials for an ephemeral, non-persistent
+      # database that lives solely inside this job's runner VM. Not secrets:
+      # nothing reachable outside this job ever uses them, and the runner
+      # (and its Docker volumes) is destroyed when the job ends.
+      POSTGRES_USER: skinai
+      POSTGRES_PASSWORD: ci_test_password
+      POSTGRES_DB: skinai
+      POSTGRES_TEST_DB: skinai_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Write ephemeral .env for docker compose
+        # compose.yaml's app/tests services declare `env_file: - .env`, so a
+        # literal .env file must exist on disk; it is never committed (see
+        # .gitignore) and contains only the placeholder values above.
+        run: |
+          cat > .env <<ENV_EOF
+          APP_NAME=skinai-ai-service
+          APP_ENV=test
+          LOG_LEVEL=INFO
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=${POSTGRES_DB}
+          POSTGRES_TEST_DB=${POSTGRES_TEST_DB}
+          DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+          EMBEDDING_DIMENSION=1536
+          CORS_ORIGINS=[]
+          ENV_EOF
+
+      - name: Build images (runtime + test targets)
+        run: docker compose build app tests
+
+      - name: Start PostgreSQL (pgvector) and wait for healthcheck
+        run: docker compose up -d --wait --wait-timeout 60 db
+
+      - name: Show database container status
+        if: always()
+        run: docker compose ps
+
+      - name: Verify pgvector extension and test database are ready
+        run: |
+          docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;" -c "SELECT extversion FROM pg_extension WHERE extname = 'vector';"
+          docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_TEST_DB" -c "SELECT 1;"
+
+      - name: Apply Alembic migrations (same command documented in README)
+        # Targets the main `skinai` database using the exact CLI path the
+        # app documents for real deployments (alembic upgrade head via the
+        # runtime image). The `skinai_test` database used by pytest below is
+        # migrated separately, by the test suite itself (see
+        # tests/conftest.py's apply_migrations fixture) -- the two never run
+        # concurrently against the same database.
+        run: docker compose run --rm -T app alembic upgrade head
+
+      - name: Run pytest against skinai_test (Postgres + pgvector)
+        run: docker compose run --rm -T tests pytest -v
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down containers, network, and ephemeral volume
+        if: always()
+        # -v removes the db_data volume created for *this job's* throwaway
+        # container only -- the runner VM itself is destroyed right after,
+        # so this has no bearing on any persistent/production database.
+        run: docker compose down -v --remove-orphans

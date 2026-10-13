@@ -1,0 +1,153 @@
+name: Deploy (manual, production)
+
+# SCAFFOLD -- disabled by default. No server hostname, SSH credentials,
+# deployment path, or registry are configured in this repository yet, so
+# this workflow cannot and does not make any remote connection today. See
+# docs/CI_CD.md "Deployment prerequisites" for exactly what must exist
+# before the commented-out steps near the bottom of this file can be
+# enabled. Do not add secrets or uncomment anything here without reviewing
+# that document first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm you intend to deploy main to production'
+        required: true
+        type: string
+
+# Only one deploy (and one set of preflight checks) at a time, ever. A
+# second dispatch while one is in flight queues behind it rather than
+# running concurrently against the same server.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Validate deployment request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the main branch
+        # workflow_dispatch can be run from any branch by default; a
+        # protected Environment alone does not guarantee that, so this is
+        # checked explicitly as defense in depth. (Also configure the
+        # production Environment's "Deployment branches" rule to `main` in
+        # GitHub repo settings -- see docs/CI_CD.md.)
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Deployments are only allowed from main (got ${{ github.ref }})."
+            exit 1
+          fi
+
+      - name: Require explicit confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "::error::Confirmation input must be exactly 'deploy'."
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy to production
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Requires the 'production' Environment to exist in repo Settings, with
+    # required reviewers configured there -- that approval gate is enforced
+    # by GitHub itself, not by this workflow file. See docs/CI_CD.md.
+    environment:
+      name: production
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check deployment configuration
+        # This repository does not yet define a deployment target. Rather
+        # than attempt a connection with missing/empty values, fail loudly
+        # here with exactly what's missing. This step is the only thing
+        # that currently runs in production `environment:` context.
+        env:
+          DEPLOY_SSH_HOST: ${{ vars.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ vars.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          missing=()
+          [ -z "$DEPLOY_SSH_HOST" ] && missing+=("vars.DEPLOY_SSH_HOST")
+          [ -z "$DEPLOY_SSH_USER" ] && missing+=("vars.DEPLOY_SSH_USER")
+          [ -z "$DEPLOY_PATH" ] && missing+=("vars.DEPLOY_PATH")
+          [ -z "$DEPLOY_SSH_PRIVATE_KEY" ] && missing+=("secrets.DEPLOY_SSH_PRIVATE_KEY")
+          [ -z "$DEPLOY_SSH_KNOWN_HOSTS" ] && missing+=("secrets.DEPLOY_SSH_KNOWN_HOSTS")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Deployment is not configured. Missing: ${missing[*]}"
+            echo "See docs/CI_CD.md 'Deployment prerequisites' for the full list" \
+                 "of required secrets/variables and server-side setup steps."
+            exit 1
+          fi
+
+          echo "::error::All required secrets/variables are present, but the" \
+               "actual deploy steps are still commented out in this workflow" \
+               "pending a reviewed server-side rollout script. See the bottom" \
+               "of .github/workflows/deploy.yml and docs/CI_CD.md."
+          exit 1
+
+      # ----------------------------------------------------------------
+      # Everything below is commented out on purpose. It sketches the
+      # intended production deploy path so it can be reviewed and enabled
+      # deliberately once docs/CI_CD.md's prerequisites are all satisfied --
+      # it is not live, does not run, and makes no network connection.
+      #
+      # - name: Write SSH private key
+      #   run: |
+      #     install -m 600 /dev/null "$HOME/.ssh/deploy_key"
+      #     printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > "$HOME/.ssh/deploy_key"
+      #
+      # - name: Pin the server's host key (never StrictHostKeyChecking=no)
+      #   run: |
+      #     mkdir -p "$HOME/.ssh"
+      #     printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > "$HOME/.ssh/known_hosts"
+      #     chmod 644 "$HOME/.ssh/known_hosts"
+      #
+      # - name: Deploy image by commit SHA, migrate, restart, health-check
+      #   env:
+      #     DEPLOY_HOST: ${{ vars.DEPLOY_SSH_HOST }}
+      #     DEPLOY_USER: ${{ vars.DEPLOY_SSH_USER }}
+      #     DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+      #     IMAGE_REF: ${{ vars.DEPLOY_REGISTRY }}/skinai-ai-service:${{ github.sha }}
+      #   run: |
+      #     ssh -i "$HOME/.ssh/deploy_key" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+      #       "$DEPLOY_USER@$DEPLOY_HOST" \
+      #       "cd $DEPLOY_PATH && ./deploy.sh $IMAGE_REF"
+      #     # deploy.sh (server-side, reviewed separately) is expected to:
+      #     #   1. docker pull $IMAGE_REF
+      #     #   2. run `alembic upgrade head` as a one-off container against
+      #     #      the skinai-ai-service database only
+      #     #   3. recreate only the skinai-ai-service app container
+      #     #   4. curl --fail http://127.0.0.1:<internal-port>/health/ready
+      #     #   5. on failure, leave the previous container/image in place
+      #     #      (see docs/CI_CD.md "Rollback")
+      #
+      # - name: Remove SSH key from runner
+      #   if: always()
+      #   run: rm -f "$HOME/.ssh/deploy_key"
+      # ----------------------------------------------------------------
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Deployment run"
+            echo ""
+            echo "- Branch: \`${{ github.ref_name }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Triggered by: ${{ github.actor }}"
+            echo "- Result: deployment is **not enabled** -- see docs/CI_CD.md"
+          } >> "$GITHUB_STEP_SUMMARY"

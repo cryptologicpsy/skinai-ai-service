@@ -1,4 +1,6 @@
 .git
+.github
+.claude
 .gitignore
 .env
 .env.*
@@ -10,3 +12,5 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+docs/
+README.md
