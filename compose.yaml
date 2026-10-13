@@ -1,0 +1,65 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-skinai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}
+      POSTGRES_DB: ${POSTGRES_DB:-skinai}
+      POSTGRES_TEST_DB: ${POSTGRES_TEST_DB:-skinai_test}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+    # Intentionally not published to the host. Uncomment only for local
+    # debugging with an external SQL client, and never in shared/prod envs.
+    # ports:
+    #   - "5432:5432"
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-skinai}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-skinai}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - internal
+
+  # Not started by `docker compose up`. Run explicitly with:
+  #   docker compose run --rm tests
+  tests:
+    build:
+      context: .
+      target: test
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-skinai}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_TEST_DB:-skinai_test}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+    profiles:
+      - test
+
+volumes:
+  db_data:
+
+networks:
+  internal:
+    driver: bridge

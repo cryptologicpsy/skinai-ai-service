@@ -1,0 +1,20 @@
+[project]
+name = "skinai-ai-service"
+version = "0.1.0"
+description = "SkinAI AI backend service (independent of the Node.js/Express + MongoDB app)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008: FastAPI's DI pattern is Depends(...)/Query(...) as an argument default
+# -- that's idiomatic here, not a bug.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
