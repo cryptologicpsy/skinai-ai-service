@@ -52,3 +52,21 @@ class ProductRepository:
 
     async def get_by_id(self, product_id: uuid.UUID) -> Product | None:
         return await self._session.get(Product, product_id)
+
+    async def get_by_external_id(self, external_id: str) -> Product | None:
+        stmt = select(Product).where(Product.external_id == external_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_name_and_brand(self, name: str, brand: str | None) -> Product | None:
+        """Best-effort fallback match for products imported without an
+        external_id. Case-insensitive on both fields; NULL brand matches
+        NULL brand. Not DB-enforced (no uniqueness constraint on
+        name+brand) -- supply external_id for guaranteed idempotency.
+        """
+
+        stmt = select(Product).where(func.lower(Product.name) == name.lower())
+        if brand is None:
+            stmt = stmt.where(Product.brand.is_(None))
+        else:
+            stmt = stmt.where(func.lower(Product.brand) == brand.lower())
+        return (await self._session.execute(stmt)).scalar_one_or_none()

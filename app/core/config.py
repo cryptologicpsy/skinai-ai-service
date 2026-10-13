@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,36 @@ class Settings(BaseSettings):
 
     default_page_size: int = 20
     max_page_size: int = 100
+
+    # Shared secret required on the `X-Admin-Api-Key` header for every
+    # /api/v1/admin/* endpoint. Left unset by default so admin endpoints are
+    # closed (503) until an operator deliberately configures one -- there is
+    # no "default" admin key. This is a bridge mechanism for trusted
+    # server-side callers only (an internal script, CI, or the existing
+    # Node.js backend calling server-to-server); it must never be embedded
+    # in browser-facing frontend code, and is not a substitute for per-user
+    # authorization.
+    admin_api_key: str | None = Field(default=None)
+
+    # Bulk product import limits (app/services/import_service.py). Deep
+    # defense alongside the reverse proxy / app server's own request-size
+    # limits, which this service does not control.
+    import_max_products: int = Field(default=500, ge=1)
+    import_max_ingredients_per_product: int = Field(default=100, ge=1)
+    import_max_json_body_bytes: int = Field(default=2_000_000, ge=1)
+
+    # Process-local (not distributed) fixed-window rate limit applied to the
+    # admin import write endpoints, keyed by the caller's admin API key.
+    # Adequate for a single-instance deployment; revisit if ever scaled to
+    # multiple app replicas.
+    admin_import_rate_limit_per_minute: int = Field(default=10, ge=1)
+
+    @field_validator("admin_api_key")
+    @classmethod
+    def _validate_admin_api_key_strength(cls, value: str | None) -> str | None:
+        if value is not None and len(value) < 16:
+            raise ValueError("ADMIN_API_KEY must be at least 16 characters when set")
+        return value
 
     @property
     def is_production(self) -> bool:

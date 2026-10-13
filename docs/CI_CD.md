@@ -25,6 +25,11 @@ Dockerfile's base image) and `pip install -r requirements-dev.txt`:
 
 - `ruff check .`
 - `ruff format --check .`
+- `pip-audit -r requirements.txt` -- scans pinned runtime dependencies for
+  known CVEs. Currently advisory (`continue-on-error: true`): it reports
+  findings in the job log but does not fail the build, since there is no
+  triage process yet for deciding which findings block a merge. Check this
+  job's log periodically even when the workflow shows green.
 
 No Docker, no database -- this is deliberately the fast path so a
 formatting/lint mistake fails in seconds, independent of the slower
@@ -57,6 +62,9 @@ migrations and models were written against. Concretely:
 6. `docker compose run --rm -T app alembic upgrade head` -- applies
    migrations to the main `skinai` database using the exact CLI command
    documented in the README for real deployments.
+6b. `docker compose run --rm -T app alembic check` -- fails the build if
+   any model change doesn't have a corresponding migration (schema drift
+   detection), catching a forgotten `alembic revision` before it ships.
 7. `docker compose run --rm -T tests pytest -v` -- runs the full pytest
    suite against the separate `skinai_test` database. The test suite
    migrates `skinai_test` itself (see "Test database lifecycle" below);
@@ -107,7 +115,12 @@ What it does today:
    into a required text input -- a dispatch click alone is not enough.
 2. A `preflight` job explicitly checks `github.ref == 'refs/heads/main'`
    and rejects anything else, even though `workflow_dispatch` can
-   technically be run from any branch.
+   technically be run from any branch; it then queries the GitHub Actions
+   API for the most recent `ci.yml` run against the exact commit SHA being
+   deployed and refuses to continue unless its conclusion is `success`.
+   This is a real, working check today (needs only `actions: read`, no
+   deployment secrets) -- a manual dispatch click does not by itself prove
+   CI passed for that commit.
 3. A `deploy` job runs under the `environment: production` GitHub
    Environment (see "Required GitHub settings" below) and checks for the
    presence of the secrets/variables listed under "Deployment
@@ -133,8 +146,15 @@ Variables), not secret but environment-specific:
 |---|---|
 | `DEPLOY_SSH_HOST` | Hostname/IP of the VPS |
 | `DEPLOY_SSH_USER` | SSH user used for deployment (should be a dedicated, non-root, limited-privilege user -- not the account used for the existing SkinAI/BeautyFlow containers) |
-| `DEPLOY_PATH` | Absolute path on the VPS to this service's own deployment directory (must be separate from any existing SkinAI/BeautyFlow deployment directory) |
 | `DEPLOY_REGISTRY` | Container registry hostname/namespace the image will be pulled from (private registry; not yet implemented -- see "Deployment strategy" below) |
+
+The deployment path is **not** a configurable variable: `deploy.yml` hardcodes
+`DEPLOY_PATH=/opt/skinai-ai-service` directly in the workflow. This is
+deliberate -- it removes any possibility of a typo'd or malicious variable
+value pointing a deploy at some other directory/project on the VPS. The
+`/opt/skinai-ai-service` directory must exist on the server and contain
+this service's own `compose.yaml` and `deploy.sh` before deployment is
+enabled.
 
 **Repository Secrets** (Settings -> Secrets and variables -> Actions ->
 Secrets):
@@ -217,6 +237,14 @@ always safely reversible.
   database are ready" step's output.
 - **`ruff format --check` fails**: run `ruff format .` locally and commit
   the result; CI never auto-formats for you.
+- **`alembic check` fails**: a SQLAlchemy model was changed without a
+  matching Alembic revision. Generate one with
+  `alembic revision --autogenerate -m "..."`, review the generated file
+  carefully, and commit it alongside the model change.
+- **`pip-audit` reports a finding**: it does not fail the build (see
+  "CI workflow" above), but don't ignore it -- check whether a newer patch
+  version of the affected package is available and whether the advisory is
+  actually reachable from this service's usage.
 - **Deploy workflow always fails at "Check deployment configuration"**:
   expected and by design until the prerequisites above are satisfied --
   see the error message for exactly which secret/variable is missing.

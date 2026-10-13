@@ -31,6 +31,12 @@ class Product(Base, TimestampMixin):
     category: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Stable identifier from the originating catalogue/import source (e.g. a
+    # supplier SKU). Nullable + unique: most rows may have none, but when
+    # present it's the key bulk imports use to update a product instead of
+    # creating a duplicate on re-run. See app/services/import_service.py.
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+
     # Embedding of `description` (and/or other product text) for semantic
     # search. Populated later by an embedding service; nullable until then.
     description_embedding: Mapped[list[float] | None] = mapped_column(

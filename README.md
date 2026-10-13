@@ -25,8 +25,11 @@ This is an initial foundation, not a complete product:
   product catalogue in this repository. Test fixtures use clearly-labeled
   synthetic data (e.g. "Fixture Gentle Cleanser" / brand "Fixture Labs")
   that could never be mistaken for a real product.
-- Write endpoints (create/update product or ingredient data) are not
-  implemented yet -- only read (list/search/get) endpoints exist.
+- The public `/api/v1/products` endpoints are read-only (list/search/get).
+  The only write path is the admin bulk-import API
+  (`/api/v1/admin/imports/*`, see "Bulk product import" below), which is
+  **disabled by default** (returns 503) until `ADMIN_API_KEY` is
+  configured, and is not a general-purpose public write API even then.
 
 ## Tech stack
 
@@ -88,6 +91,13 @@ Defined in `app/models/` and created by `migrations/versions/0001_initial_schema
   free-form so new statuses don't need a migration). Each row references
   *either* a product *or* an ingredient (enforced by a CHECK constraint),
   not a loosely-typed polymorphic key.
+- **product_imports** -- one row per bulk-import request (see "Bulk
+  product import" below), recording its outcome and per-product results
+  for `GET /api/v1/admin/imports/{import_id}` and for idempotent retries.
+
+`products.external_id` (nullable, unique) is a stable identifier from an
+external catalogue/source, added in migration `0002` specifically so bulk
+imports can update a product instead of creating a duplicate on re-run.
 
 ### Embedding dimension
 
@@ -121,6 +131,21 @@ columns.
    ```
 4. Visit `http://localhost:8000/health`, `http://localhost:8000/health/ready`,
    and `http://localhost:8000/docs` (interactive API docs).
+
+## Bulk product import (admin)
+
+`POST /api/v1/admin/imports/products` (and `/products/file` for a JSON
+file upload, and `GET /api/v1/admin/imports/{import_id}` for results)
+bulk-create/update products, their ingredients, and source/verification
+metadata. Full payload format, limits, and idempotency semantics are in
+[`docs/BULK_IMPORT.md`](docs/BULK_IMPORT.md).
+
+**This is internal admin tooling, not a public API.** Every request
+requires an `X-Admin-Api-Key` header matching the `ADMIN_API_KEY`
+environment variable. If that variable is unset -- the default -- these
+endpoints return `503` regardless of what's sent; there is no default
+key and no way to call them until an operator deliberately sets one. See
+"Security notes" below before configuring it.
 
 ## Running tests
 
@@ -179,9 +204,13 @@ manual dispatch):
   extension and the `skinai_test` database are ready.
 - Applies Alembic migrations to the `skinai` database via
   `docker compose run --rm app alembic upgrade head` (the same command
-  documented above), then runs the full pytest suite against the separate
-  `skinai_test` database via `docker compose run --rm tests pytest -v`
-  (reusing the `tests` Compose service -- see "Running tests").
+  documented above), then runs `alembic check` (fails the build if a
+  model change is missing its migration), then runs the full pytest suite
+  against the separate `skinai_test` database via
+  `docker compose run --rm tests pytest -v` (reusing the `tests` Compose
+  service -- see "Running tests").
+- `pip-audit` scans pinned dependencies for known CVEs (advisory: reported
+  in the log, does not currently fail the build).
 - Always tears down containers/volumes for that job, success or failure.
 
 CI does not touch any production database and requires no repository
@@ -193,16 +222,20 @@ deploys automatically:
 
 - Trigger: manual `workflow_dispatch` only, requiring you to type `deploy`
   into a confirmation input.
-- Guarded by an explicit `main`-branch check *and* a GitHub Environment
-  named `production` (configure this in **Settings -> Environments**, with
-  required reviewers and "Deployment branches" restricted to `main` -- see
-  `docs/CI_CD.md`).
+- Guarded by an explicit `main`-branch check, a check that `ci.yml` has
+  actually succeeded for the exact commit SHA being deployed (via the
+  GitHub Actions API), *and* a GitHub Environment named `production`
+  (configure this in **Settings -> Environments**, with required reviewers
+  and "Deployment branches" restricted to `main` -- see `docs/CI_CD.md`).
+- The deployment path is hardcoded to `/opt/skinai-ai-service` in the
+  workflow itself (not a configurable variable), so it can never be
+  pointed at another project's directory by mistake.
 - Today, running it will always stop at a "Check deployment configuration"
   step and report exactly which secrets/variables
-  (`DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_PATH`,
+  (`DEPLOY_SSH_HOST`, `DEPLOY_SSH_USER`,
   `DEPLOY_SSH_PRIVATE_KEY`, `DEPLOY_SSH_KNOWN_HOSTS`, ...) are missing,
-  because no VPS hostname, SSH credentials, or deployment path have been
-  configured yet. No network connection is attempted.
+  because no VPS hostname or SSH credentials have been configured yet. No
+  network connection is attempted.
 - Once those prerequisites exist and have been reviewed, the (currently
   commented-out) deploy steps pull an image tagged by commit SHA over SSH
   to a pinned host key, run migrations against this service's own
@@ -249,6 +282,9 @@ full list with explanations):
 | `DATABASE_URL` | async SQLAlchemy connection string used by the app and Alembic |
 | `EMBEDDING_DIMENSION` | pgvector column width (see above) |
 | `CORS_ORIGINS` | JSON array of allowed origins; empty means no CORS middleware is installed |
+| `ADMIN_API_KEY` | shared secret required on admin/import endpoints; unset (default) keeps them disabled |
+| `IMPORT_MAX_PRODUCTS`, `IMPORT_MAX_INGREDIENTS_PER_PRODUCT`, `IMPORT_MAX_JSON_BODY_BYTES` | bulk import limits, see `docs/BULK_IMPORT.md` |
+| `ADMIN_IMPORT_RATE_LIMIT_PER_MINUTE` | per-API-key rate limit on import endpoints (process-local) |
 
 No API keys, passwords, or secrets are hardcoded anywhere in the codebase;
 `.env` is git-ignored and `.env.example` contains placeholders only.
@@ -261,9 +297,24 @@ No API keys, passwords, or secrets are hardcoded anywhere in the codebase;
   `Dockerfile`).
 - No secrets are baked into the image; everything required at runtime is
   injected via environment variables / `.env`.
-- This service currently has **no authentication or authorization** --
-  treat it as internal-only until that's added, and do not route public
-  traffic to it.
+- The public product read endpoints (`/api/v1/products*`) have **no
+  authentication** -- treat the whole service as internal-only (bind it to
+  `127.0.0.1` on the VPS, no public reverse-proxy route) until that
+  changes.
+- Admin/import endpoints (`/api/v1/admin/imports/*`) require a shared
+  `X-Admin-Api-Key` secret (`ADMIN_API_KEY`) and are disabled (503) unless
+  that's explicitly configured. This is a bridge mechanism for trusted
+  server-side callers only -- **never embed this key in a browser
+  frontend**, and CORS configuration is not a substitute for it (CORS only
+  affects which origins a *browser* will let read the response; it does
+  nothing to stop a direct, non-browser request). It is also not
+  per-user authorization/RBAC; treat it as a single operator-level
+  credential.
+- Admin import endpoints are additionally rate-limited
+  (`ADMIN_IMPORT_RATE_LIMIT_PER_MINUTE`, process-local) and reject
+  oversized request bodies before parsing them
+  (`IMPORT_MAX_JSON_BODY_BYTES`), but neither replaces a reverse-proxy /
+  network-level body-size cap or the `127.0.0.1`-only exposure above.
 - Test fixtures use obviously-synthetic data (e.g. "Fixture Labs") so there
   is no risk of fixtures being mistaken for real product data, user data,
   or a production dump.

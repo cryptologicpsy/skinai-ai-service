@@ -46,6 +46,14 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      - name: Dependency vulnerability scan (pip-audit)
+        # Advisory, not yet a merge gate: flags known CVEs in pinned
+        # dependencies without failing the build, since a new advisory
+        # landing upstream shouldn't block unrelated PRs. Revisit once
+        # there's a documented process for triaging/accepting findings.
+        run: pip-audit -r requirements.txt --progress-spinner=off
+        continue-on-error: true
+
   # Builds the real Dockerfile targets and runs the existing pytest suite
   # against a real PostgreSQL + pgvector instance, reusing the same
   # compose.yaml services documented in the README (db / app / tests) so CI
@@ -85,6 +93,11 @@ jobs:
           DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
           EMBEDDING_DIMENSION=1536
           CORS_ORIGINS=[]
+          ADMIN_API_KEY=ci-only-placeholder-admin-key
+          IMPORT_MAX_PRODUCTS=500
+          IMPORT_MAX_INGREDIENTS_PER_PRODUCT=100
+          IMPORT_MAX_JSON_BODY_BYTES=2000000
+          ADMIN_IMPORT_RATE_LIMIT_PER_MINUTE=10
           ENV_EOF
 
       - name: Build images (runtime + test targets)
@@ -111,6 +124,12 @@ jobs:
         # tests/conftest.py's apply_migrations fixture) -- the two never run
         # concurrently against the same database.
         run: docker compose run --rm -T app alembic upgrade head
+
+      - name: Verify no model changes are missing a migration
+        # Catches the class of bug where a model is edited but no Alembic
+        # revision was generated for it -- fails the build instead of
+        # silently drifting.
+        run: docker compose run --rm -T app alembic check
 
       - name: Run pytest against skinai_test (Postgres + pgvector)
         run: docker compose run --rm -T tests pytest -v

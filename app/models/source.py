@@ -37,10 +37,16 @@ class SourceRecord(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = id_column()
     product_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     ingredient_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("ingredients.id", ondelete="CASCADE"), nullable=True
+        UUID(as_uuid=True),
+        ForeignKey("ingredients.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     source_name: Mapped[str] = mapped_column(String(255), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)

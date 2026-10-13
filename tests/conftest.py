@@ -20,6 +20,15 @@ os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://skinai:skinai@localhost:5432/skinai_test",
 )
+# Fixed, obviously-fake test-only key (>=16 chars, enforced by Settings).
+# Never a real secret -- this only ever talks to the ephemeral test DB.
+os.environ.setdefault("ADMIN_API_KEY", "test-admin-key-not-a-secret")
+os.environ.setdefault("IMPORT_MAX_PRODUCTS", "500")
+os.environ.setdefault("IMPORT_MAX_INGREDIENTS_PER_PRODUCT", "100")
+os.environ.setdefault("IMPORT_MAX_JSON_BODY_BYTES", "2000000")
+# Belt-and-suspenders first layer; see the get_settings() override below
+# for why this alone isn't sufficient under `docker compose run tests`.
+os.environ.setdefault("ADMIN_IMPORT_RATE_LIMIT_PER_MINUTE", "1000")
 
 import pytest
 import pytest_asyncio
@@ -28,11 +37,22 @@ from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import AsyncSessionLocal, engine, get_db
 from app.main import app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Force a high rate limit for the whole test session. `os.environ.setdefault`
+# above is not enough: when running via `docker compose run tests`, the
+# container's real environment already defines ADMIN_IMPORT_RATE_LIMIT_PER_MINUTE
+# (from the shared .env file), and setdefault() never overrides an
+# already-set variable. The limiter's actual blocking behavior is covered
+# by a focused unit test against the class directly (see
+# test_admin_imports.py::test_rate_limiter_blocks_after_limit), not by
+# running the whole suite's sequential HTTP calls through a tight limit.
+get_settings().admin_import_rate_limit_per_minute = 1_000_000
 
 
 def _alembic_config() -> Config:
@@ -88,3 +108,8 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def admin_headers() -> dict[str, str]:
+    return {"X-Admin-Api-Key": get_settings().admin_api_key}

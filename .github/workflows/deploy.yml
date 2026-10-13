@@ -25,6 +25,9 @@ concurrency:
 
 permissions:
   contents: read
+  # Read-only: needed to look up whether ci.yml already passed for the
+  # commit being deployed. Nothing in this workflow writes anywhere.
+  actions: read
 
 jobs:
   preflight:
@@ -51,6 +54,25 @@ jobs:
             exit 1
           fi
 
+      - name: Require a successful CI run for this exact commit
+        # A manual dispatch only proves someone clicked a button, not that
+        # this commit passed ci.yml. Query the Actions API for the most
+        # recent "CI" run against this SHA and refuse to proceed unless its
+        # conclusion is "success".
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs_json=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${{ github.sha }}&status=completed" \
+            --jq '.workflow_runs')
+          conclusion=$(echo "$runs_json" | jq -r '.[0].conclusion // "none"')
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::No successful CI run found for commit ${{ github.sha }} (latest conclusion: $conclusion)."
+            echo "Push/re-run ci.yml for this commit and let it pass before deploying."
+            exit 1
+          fi
+          echo "CI passed for ${{ github.sha }}."
+
   deploy:
     name: Deploy to production
     needs: preflight
@@ -63,6 +85,11 @@ jobs:
       name: production
     permissions:
       contents: read
+    env:
+      # Fixed, not configurable: this deployment must only ever touch its
+      # own directory, never another project's. Hardcoding this (instead
+      # of a variable) removes an entire class of misconfiguration risk.
+      DEPLOY_PATH: /opt/skinai-ai-service
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -75,14 +102,12 @@ jobs:
         env:
           DEPLOY_SSH_HOST: ${{ vars.DEPLOY_SSH_HOST }}
           DEPLOY_SSH_USER: ${{ vars.DEPLOY_SSH_USER }}
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
           DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
         run: |
           missing=()
           [ -z "$DEPLOY_SSH_HOST" ] && missing+=("vars.DEPLOY_SSH_HOST")
           [ -z "$DEPLOY_SSH_USER" ] && missing+=("vars.DEPLOY_SSH_USER")
-          [ -z "$DEPLOY_PATH" ] && missing+=("vars.DEPLOY_PATH")
           [ -z "$DEPLOY_SSH_PRIVATE_KEY" ] && missing+=("secrets.DEPLOY_SSH_PRIVATE_KEY")
           [ -z "$DEPLOY_SSH_KNOWN_HOSTS" ] && missing+=("secrets.DEPLOY_SSH_KNOWN_HOSTS")
 
@@ -120,20 +145,40 @@ jobs:
       #   env:
       #     DEPLOY_HOST: ${{ vars.DEPLOY_SSH_HOST }}
       #     DEPLOY_USER: ${{ vars.DEPLOY_SSH_USER }}
-      #     DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
       #     IMAGE_REF: ${{ vars.DEPLOY_REGISTRY }}/skinai-ai-service:${{ github.sha }}
       #   run: |
       #     ssh -i "$HOME/.ssh/deploy_key" -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
       #       "$DEPLOY_USER@$DEPLOY_HOST" \
       #       "cd $DEPLOY_PATH && ./deploy.sh $IMAGE_REF"
-      #     # deploy.sh (server-side, reviewed separately) is expected to:
-      #     #   1. docker pull $IMAGE_REF
-      #     #   2. run `alembic upgrade head` as a one-off container against
-      #     #      the skinai-ai-service database only
-      #     #   3. recreate only the skinai-ai-service app container
-      #     #   4. curl --fail http://127.0.0.1:<internal-port>/health/ready
-      #     #   5. on failure, leave the previous container/image in place
-      #     #      (see docs/CI_CD.md "Rollback")
+      #     # deploy.sh lives on the VPS at /opt/skinai-ai-service (reviewed
+      #     # and version-controlled separately from this repo) and MUST:
+      #     #   0. operate only inside /opt/skinai-ai-service, using that
+      #     #      directory's own compose.yaml / project name -- never a
+      #     #      bare `docker ...` command that could match a container
+      #     #      from another project, and never `docker system prune` /
+      #     #      `docker volume prune` (those are NOT project-scoped and
+      #     #      would affect the unrelated SkinAI/BeautyFlow containers
+      #     #      on the same VPS).
+      #     #   1. set -euo pipefail, so any failure below aborts instead
+      #     #      of continuing with a half-applied deploy.
+      #     #   2. docker pull $IMAGE_REF.
+      #     #   3. run `alembic upgrade head` as a one-off container against
+      #     #      ONLY this service's database, BEFORE touching the
+      #     #      running app container. If this fails, stop here: the
+      #     #      previous app container is still up and unaffected, so
+      #     #      this is a no-downtime abort, not a partial deploy.
+      #     #   4. only now recreate the skinai-ai-service app container
+      #     #      from $IMAGE_REF (`docker compose up -d --no-deps app`
+      #     #      scoped to this project) -- do not stop/remove any other
+      #     #      service.
+      #     #   5. poll `curl --fail http://127.0.0.1:8000/health` and
+      #     #      `.../health/ready` with a few retries; if either never
+      #     #      succeeds, this is a failed deploy -- see step 6.
+      #     #   6. on any failure in 3-5, do NOT delete the previous image
+      #     #      or container. Keep it so "redeploy the previous SHA" is
+      #     #      always available as documented in docs/CI_CD.md
+      #     #      "Rollback" -- this script does not implement an
+      #     #      automatic rollback, only preserves the ability to do one.
       #
       # - name: Remove SSH key from runner
       #   if: always()

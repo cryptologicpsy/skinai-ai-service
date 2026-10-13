@@ -21,6 +21,11 @@ services:
     # debugging with an external SQL client, and never in shared/prod envs.
     # ports:
     #   - "5432:5432"
+    # Conservative caps: this VPS also runs unrelated SkinAI/BeautyFlow
+    # containers sharing ~4GB RAM / 2 vCPUs. A runaway query here should
+    # not be able to starve them.
+    mem_limit: 1g
+    cpus: "1.0"
 
   app:
     build:
@@ -34,10 +39,25 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Bound to loopback only: this service is not meant to be reachable
+    # from outside the VPS. Any public exposure must go through a
+    # separately-configured, separately-reviewed reverse proxy.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     networks:
       - internal
+    mem_limit: 512m
+    cpus: "1.0"
 
   # Not started by `docker compose up`. Run explicitly with:
   #   docker compose run --rm tests
