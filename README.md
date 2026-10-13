@@ -4,11 +4,6 @@ An independent Python/FastAPI backend for SkinAI's AI-related functionality
 (product/ingredient data, and future embeddings/RAG over skincare
 knowledge).
 
-**This service is separate from, and does not modify, the existing
-Node.js/Express + MongoDB SkinAI backend.** It owns its own PostgreSQL
-database and is designed to be deployed and scaled independently. Nothing
-here talks to the Node.js service or its database.
-
 ## Status / limitations
 
 This is an initial foundation, not a complete product:
